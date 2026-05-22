@@ -72,7 +72,7 @@ fi
         read -r npw nband sparsity ethr <<< "$cfg"
         for omp in "${OMP_THREADS[@]}"; do
             export OMP_NUM_THREADS=$omp
-            eval "$MPIRUN -np 1 $BENCH_BIN $npw $nband $sparsity $ethr 2>/dev/null || echo $FAIL_LINE"
+            timeout 120 $MPIRUN -np 1 $BENCH_BIN $npw $nband $sparsity $ethr 2>/dev/null || echo $FAIL_LINE
         done
     done
 } > "$OUTPUT"

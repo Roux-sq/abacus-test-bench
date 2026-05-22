@@ -86,9 +86,10 @@ int main(int argc, char** argv)
     MPI_Bcast(e_lapack.data(), npw, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
 
-    // Initial psi with perturbation
+    // Initial psi with perturbation (include extra bands)
+    const int n_band_total = nband + n_extra;
     psi::Psi<std::complex<double>> psi;
-    psi.resize(1, nband, npw);
+    psi.resize(1, n_band_total, npw);
     std::default_random_engine engine(7);
     std::uniform_real_distribution<double> dist(0.2, 1.0);
     for (int ib = 0; ib < nband; ++ib)
@@ -96,6 +97,20 @@ int main(int argc, char** argv)
         for (int ig = 0; ig < npw; ++ig)
         {
             psi(ib, ig) = h_lapack[ig + ib * npw] * dist(engine);
+        }
+    }
+    // Initialize extra bands with independent random vectors (different seed).
+    // These need to be linearly independent from the physical bands to avoid
+    // triggering WARNING_QUIT in modified_gram_schmidt.
+    {
+        std::default_random_engine engine_extra(42);
+        std::uniform_real_distribution<double> dist_extra(-1.0, 1.0);
+        for (int ib = nband; ib < n_band_total; ++ib)
+        {
+            for (int ig = 0; ig < npw; ++ig)
+            {
+                psi(ib, ig) = std::complex<double>(dist_extra(engine_extra), dist_extra(engine_extra));
+            }
         }
     }
 
@@ -139,7 +154,6 @@ int main(int argc, char** argv)
     hsolver::DiagoIterAssist<std::complex<double>>::PW_DIAG_NMAX = 200;
     hsolver::DiagoPPCG<std::complex<double>> ppcg(precondition_local);
 
-#ifdef PPCG_V2
     if (n_extra > 0)
     {
         ppcg.set_n_extra(n_extra);
@@ -156,7 +170,6 @@ int main(int argc, char** argv)
         }
         ppcg.set_block_sizes(block_sizes);
     }
-#endif
 
     ppcg.init_iter(nband, nband, npw, psi_local.get_current_ngk());
 
@@ -182,7 +195,6 @@ int main(int argc, char** argv)
         std::cout << npw << "," << nband << "," << sparsity << ","
                   << nproc << "," << omp_threads << "," << niter << ","
                   << elapsed_ms << "," << max_error;
-#ifdef PPCG_V2
         if (n_extra > 0)
         {
             std::cout << "," << n_extra;
@@ -191,7 +203,6 @@ int main(int argc, char** argv)
         {
             std::cout << "," << block_size;
         }
-#endif
         std::cout << std::endl;
     }
 
