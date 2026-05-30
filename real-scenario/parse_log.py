@@ -118,12 +118,13 @@ def parse_ppcg_stderr(filepath: str) -> dict:
         r'blocked=(yes|no)'
     )
 
-    # [PPCG] done: niter=42 final_err[0]=1.2e-11 final_err[end]=3.4e-07 eigen[0]=-5.678
+    # [PPCG] done: niter=42 final_err[0]=1.2e-11 final_err[end]=3.4e-07 eigen[0]=-5.678 dev=GPU
     done_pattern = re.compile(
         r'\[PPCG\]\s+done:\s+niter=(\d+)\s+'
         r'final_err\[0\]=([\d.eE+-]+)\s+'
         r'final_err\[end\]=([\d.eE+-]+)\s+'
         r'eigen\[0\]=([\d.eE+-]+)'
+        r'(?:\s+dev=(\w+))?'
     )
 
     current_run = None
@@ -157,6 +158,7 @@ def parse_ppcg_stderr(filepath: str) -> dict:
                 "final_err_first": float(m.group(2)),
                 "final_err_last": float(m.group(3)),
                 "eigen_first": float(m.group(4)),
+                "device": m.group(5) if m.lastindex and m.lastindex >= 5 else None,
             }
 
     if current_run is not None:
@@ -172,11 +174,16 @@ def parse_ppcg_stderr(filepath: str) -> dict:
 
     # Last locking ratio
     last_locked = None
+    ppcg_device = None
     for run in result["ppcg_runs"]:
         if run.get("iterations"):
             last_locked = run["iterations"][-1].get("locked")
+        if run.get("done") and run["done"].get("device"):
+            ppcg_device = run["done"]["device"]
     if last_locked:
         result["final_locked"] = last_locked
+    if ppcg_device:
+        result["ppcg_device"] = ppcg_device
 
     return result
 
@@ -310,6 +317,8 @@ def main():
         if ppcg and "ppcg_runs" in ppcg:
             n_runs = len(ppcg["ppcg_runs"])
             print(f"PPCG runs:        {n_runs}")
+            if ppcg.get("ppcg_device"):
+                print(f"PPCG device:      {ppcg['ppcg_device']}")
             if ppcg.get("avg_iters") is not None:
                 print(f"PPCG avg iters:   {ppcg['avg_iters']:.1f}")
                 print(f"PPCG min/max:     {ppcg['min_iters']} / {ppcg['max_iters']}")

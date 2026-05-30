@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./run_compare.sh --solvers cg,bpcg,ppcg,dav,dav_subspace --np 4 \
+#       --device gpu \
 #       --example ../../abacus-user-guide/examples/pw/001_4GaAs
 
 set -euo pipefail
@@ -14,6 +15,7 @@ RUN_SINGLE="$SCRIPT_DIR/run_single.sh"
 SOLVERS="cg,bpcg,ppcg,dav,dav_subspace"
 NP=""
 EXAMPLE_DIR=""
+DEVICE="auto"
 BINARY=""
 OUTPUT_DIR="$SCRIPT_DIR/results"
 
@@ -36,17 +38,22 @@ while [[ $# -gt 0 ]]; do
             BINARY="$2"; shift 2 ;;
         --binary=*)
             BINARY="${1#--binary=}"; shift ;;
+        --device)
+            DEVICE="$2"; shift 2 ;;
+        --device=*)
+            DEVICE="${1#--device=}"; shift ;;
         --output-dir)
             OUTPUT_DIR="$2"; shift 2 ;;
         --output-dir=*)
             OUTPUT_DIR="${1#--output-dir=}"; shift ;;
         -h|--help)
-            echo "Usage: $0 --np N --example DIR [--solvers LIST] [--binary PATH]"
+            echo "Usage: $0 --np N --example DIR [--solvers LIST] [--device DEV] [--binary PATH]"
             echo ""
             echo "Options:"
             echo "  --solvers LIST  Comma-separated solver list (default: cg,bpcg,ppcg,dav,dav_subspace)"
             echo "  --np N          Number of MPI processes (required)"
             echo "  --example DIR   Path to example directory (required)"
+            echo "  --device DEV    Device: cpu, gpu, or auto (default: auto)"
             echo "  --binary PATH   Path to ABACUS binary"
             echo "  --output-dir DIR Directory for results (default: ./results)"
             exit 0
@@ -78,12 +85,14 @@ fi
 # Build run_single extra args
 RS_EXTRA=()
 [[ -n "$BINARY" ]] && RS_EXTRA+=(--binary "$BINARY")
+RS_EXTRA+=(--device "$DEVICE")
 RS_EXTRA+=(--output-dir "$OUTPUT_DIR")
 
 # ── print header ────────────────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║  ABACUS Solver Comparison: $EXAMPLE_NAME"
 echo "║  Solvers: $SOLVERS"
+echo "║  Device: $DEVICE"
 echo "║  MPI processes: $NP"
 echo "║  Binary: ${BINARY:-auto-detect}"
 echo "╚══════════════════════════════════════════════════════════════════════╝"

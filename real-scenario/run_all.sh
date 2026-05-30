@@ -13,6 +13,7 @@ RUN_COMPARE="$SCRIPT_DIR/run_compare.sh"
 # ── defaults ────────────────────────────────────────────────────────────────
 SOLVERS="cg,bpcg,ppcg"
 NP=""
+DEVICE="auto"
 BINARY=""
 OUTPUT_DIR="$SCRIPT_DIR/results"
 QUICK=0
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             NP="${1#--np=}"; shift ;;
         --quick)
             QUICK=1; shift ;;
+        --device)
+            DEVICE="$2"; shift 2 ;;
+        --device=*)
+            DEVICE="${1#--device=}"; shift ;;
         --binary)
             BINARY="$2"; shift 2 ;;
         --binary=*)
@@ -47,12 +52,13 @@ while [[ $# -gt 0 ]]; do
         --examples-root=*)
             EXAMPLES_ROOT="${1#--examples-root=}"; shift ;;
         -h|--help)
-            echo "Usage: $0 --np N [--solvers LIST] [--quick] [--binary PATH]"
+            echo "Usage: $0 --np N [--solvers LIST] [--quick] [--device DEV] [--binary PATH]"
             echo ""
             echo "Options:"
             echo "  --solvers LIST    Comma-separated solver list (default: cg,bpcg,ppcg)"
             echo "  --np N            Number of MPI processes (required)"
             echo "  --quick           Only run first 3 examples (quick validation)"
+            echo "  --device DEV      Device: cpu, gpu, or auto (default: auto)"
             echo "  --binary PATH     Path to ABACUS binary"
             echo "  --output-dir DIR  Directory for results (default: ./results)"
             echo "  --examples-root   Root directory for pw examples (auto-detected)"
@@ -103,6 +109,7 @@ fi
 echo "=== ABACUS Multi-Solver Benchmark ==="
 echo "Examples root: $EXAMPLES_ROOT"
 echo "Solvers:       $SOLVERS"
+echo "Device:        $DEVICE"
 echo "MPI procs:     $NP"
 echo "Binary:        $BINARY"
 echo "Examples:      ${#EXAMPLES[@]} cases"
@@ -112,10 +119,11 @@ echo ""
 # Build run_compare extra args
 RC_EXTRA=()
 [[ -n "$BINARY" ]] && RC_EXTRA+=(--binary "$BINARY")
+RC_EXTRA+=(--device "$DEVICE")
 RC_EXTRA+=(--output-dir "$OUTPUT_DIR")
 
 # ── initialize summary CSV ──────────────────────────────────────────────────
-echo "example,solver,atoms,np,total_energy,scf_steps,wall_time_s,exit_code,ppcg_info" > "$SUMMARY_CSV"
+echo "example,solver,device,atoms,np,total_energy,scf_steps,wall_time_s,exit_code,ppcg_info" > "$SUMMARY_CSV"
 
 # ── run each example ────────────────────────────────────────────────────────
 TOTAL_START=$(date +%s)
@@ -158,15 +166,17 @@ for i in "${!EXAMPLES[@]}"; do
     if [[ -f "$RESULT_FILE" ]]; then
         # Skip header line, append each data line (avoid pipe subshell for counter)
         while IFS= read -r line; do
-            # Extract solver name from the line
+            # Extract solver and device from the line
             read_solver=$(echo "$line" | cut -d',' -f1)
+            read_device=$(echo "$line" | cut -d',' -f2)
             ppcg_info=""
             if [[ "$read_solver" == "ppcg" ]]; then
-                ppcg_iters=$(echo "$line" | cut -d',' -f7 2>/dev/null || echo "")
-                ppcg_locked=$(echo "$line" | cut -d',' -f8 2>/dev/null || echo "")
+                # PPCG: solver,device,np,energy,steps,time,code,iters,locked → fields 8,9
+                ppcg_iters=$(echo "$line" | cut -d',' -f8 2>/dev/null || echo "")
+                ppcg_locked=$(echo "$line" | cut -d',' -f9 2>/dev/null || echo "")
                 ppcg_info="iters=$ppcg_iters locked=$ppcg_locked"
             fi
-            echo "$example_name,$read_solver,$ATOMS,$NP,$(echo "$line" | cut -d',' -f3-6),$ppcg_info"
+            echo "$example_name,$read_solver,$read_device,$ATOMS,$(echo "$line" | cut -d',' -f3-),$ppcg_info"
         done < <(tail -n +2 "$RESULT_FILE") >> "$SUMMARY_CSV"
         PASS_COUNT=$((PASS_COUNT + 1))
     else
@@ -174,7 +184,7 @@ for i in "${!EXAMPLES[@]}"; do
         IFS=',' read -ra SOLVER_ARRAY <<< "$SOLVERS"
         for solver in "${SOLVER_ARRAY[@]}"; do
             solver=$(echo "$solver" | xargs)
-            echo "$example_name,$solver,$ATOMS,$NP,FAIL,FAIL,FAIL,FAIL," >> "$SUMMARY_CSV"
+            echo "$example_name,$solver,$DEVICE,$ATOMS,$NP,FAIL,FAIL,FAIL,FAIL," >> "$SUMMARY_CSV"
         done
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAIL_LIST="$FAIL_LIST $example_name"

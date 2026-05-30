@@ -3,6 +3,8 @@
 本目录包含使用 ABACUS 官方算例集 (`abacus-user-guide/examples/pw/`) 测试 PPCG 特征值求解器可靠性的自动化脚本，
 支持将 PPCG 与 CG、BPCG、David、dav_subspace 等求解器进行正确性和性能对比。
 
+**所有 PW 求解器 (cg, bpcg, ppcg, dav, dav_subspace) 均支持 CPU 和 GPU（CUDA）两种平台。**
+
 ## 目录结构
 
 ```
@@ -35,14 +37,24 @@ cmake --build build -j$(nproc)
 
 **重要**：PPCG 在 `feature/eigen-solver-optimization` 分支上，编译前请确认在该分支上。
 
-### 3. 使脚本可执行
+### GPU 编译（CUDA）
+
+如需在 GPU 上测试，使用以下 cmake 配置：
 
 ```bash
-cd benchmark/real-scenario
-chmod +x run_single.sh run_compare.sh run_all.sh
+cd abacus-develop
+cmake -B build_gpu -DBUILD_TESTING=ON -DENABLE_MPI=ON -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build_gpu -j$(nproc)
 ```
 
-### 4. 安装 Python 3（用于 parse_log.py）
+编译成功后，GPU 二进制文件位于 `build_gpu/abacus_pw_gpu`（PW-only）或 `build_gpu/abacus_std_gpu`（LCAO）。
+
+**注意**：
+- 需要安装 CUDA Toolkit 和兼容的 GPU 驱动
+- `--device gpu` 时脚本会自动搜索 `build_gpu/` 下的 GPU 二进制文件
+- 也可手动指定：`--binary /path/to/abacus_pw_gpu`
+
+### 使脚本可执行
 
 ```bash
 python3 --version  # 确认可用
@@ -76,6 +88,30 @@ cd benchmark/real-scenario
     --np 4 \
     --example ../../abacus-user-guide/examples/pw/001_4GaAs \
     --binary ../../abacus-develop/build/abacus
+```
+
+### GPU 测试
+
+```bash
+cd benchmark/real-scenario
+
+# GPU 上测试 PPCG（单算例）
+./run_single.sh \
+    --solver ppcg \
+    --np 4 \
+    --device gpu \
+    --example ../../abacus-user-guide/examples/pw/001_4GaAs \
+    --binary ../../abacus-develop/build_gpu/abacus_pw_gpu
+
+# GPU 上对比所有求解器
+./run_compare.sh \
+    --solvers cg,bpcg,ppcg,dav,dav_subspace \
+    --np 4 \
+    --device gpu \
+    --example ../../abacus-user-guide/examples/pw/001_4GaAs
+
+# GPU 上批量运行
+./run_all.sh --solvers cg,bpcg,ppcg --np 4 --device gpu --quick
 ```
 
 ### 第三步：单算例多求解器对比
@@ -260,8 +296,10 @@ PPCG 每 10 轮迭代向 stderr 输出一行：
 ### "ks_solver = ppcg not recognized"
 → ABACUS 版本过旧，请确认在 `feature/eigen-solver-optimization` 分支上编译
 
-### "DiagoPPCG falls back to BPCG on GPU"
-→ PPCG 不支持 GPU，请使用 CPU-only 编译（不要设置 `-DUSE_CUDA=ON`）
+### GPU 运行时错误（如 `cudaError` 或 `out of memory`）
+→ 检查 CUDA 驱动：`nvidia-smi`
+→ 减少 `--np`（GPU 显存按进程分配）
+→ 先从小算例开始：`--quick` 只跑 001~003
 
 ### MPI 相关错误
 → 确认 `mpirun` 可用：`which mpirun`，检查 `--np` 不超过机器核心数

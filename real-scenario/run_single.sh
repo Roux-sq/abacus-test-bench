@@ -2,9 +2,9 @@
 # run_single.sh — Run ABACUS with a specific solver on a single example case.
 #
 # Usage:
-#   ./run_single.sh --solver ppcg --np 4 \
+#   ./run_single.sh --solver ppcg --np 4 --device gpu \
 #       --example ../../abacus-user-guide/examples/pw/001_4GaAs \
-#       --binary ../../abacus-develop/build/abacus
+#       --binary ../../abacus-develop/build/abacus_pw_gpu
 
 set -euo pipefail
 
@@ -12,6 +12,7 @@ set -euo pipefail
 SOLVER=""
 NP=""
 EXAMPLE_DIR=""
+DEVICE="auto"
 _DEFAULT_BINARY_DIR="$(cd "$(dirname "$0")/../../abacus-develop/build" 2>/dev/null && pwd)" || true
 BINARY="${_DEFAULT_BINARY_DIR:-/not/found}/abacus"
 OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
@@ -42,6 +43,10 @@ while [[ $# -gt 0 ]]; do
             OMP_NUM_THREADS="$2"; shift 2 ;;
         --omp=*)
             OMP_NUM_THREADS="${1#--omp=}"; shift ;;
+        --device)
+            DEVICE="$2"; shift 2 ;;
+        --device=*)
+            DEVICE="${1#--device=}"; shift ;;
         --output-dir)
             OUTPUT_DIR="$2"; shift 2 ;;
         --output-dir=*)
@@ -51,7 +56,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)
             DRY_RUN=1; shift ;;
         -h|--help)
-            echo "Usage: $0 --solver NAME --np N --example DIR [--binary PATH] [--omp N] [--output-dir DIR]"
+            echo "Usage: $0 --solver NAME --np N --example DIR [--binary PATH] [--omp N] [--device DEV] [--output-dir DIR]"
             echo ""
             echo "Options:"
             echo "  --solver NAME    Solver to use: cg, bpcg, ppcg, dav, dav_subspace"
@@ -59,9 +64,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --example DIR    Path to example directory (containing INPUT, STRU, KPT)"
             echo "  --binary PATH    Path to ABACUS binary (default: ../../abacus-develop/build/abacus)"
             echo "  --omp N          OpenMP threads (default: 1)"
+            echo "  --device DEV     Device: cpu, gpu, or auto (default: auto)"
             echo "  --output-dir DIR Directory for results (default: ./results)"
             echo "  --timeout SEC    Timeout in seconds (default: 3600)"
             echo "  --dry-run        Print what would be done without executing"
+            echo ""
+            echo "GPU example:"
+            echo "  $0 --solver ppcg --np 4 --device gpu \\"
+            echo "      --example ../../abacus-user-guide/examples/pw/001_4GaAs \\"
+            echo "      --binary ../../abacus-develop/build/abacus_pw_gpu"
             exit 0
             ;;
         *)
@@ -98,6 +109,28 @@ case "$SOLVER" in
         echo "ERROR: unknown solver '$SOLVER'. Valid: cg, bpcg, ppcg, dav, dav_subspace" >&2
         exit 1 ;;
 esac
+
+# Validate device
+case "$DEVICE" in
+    cpu|gpu|auto) ;;
+    *)
+        echo "ERROR: unknown device '$DEVICE'. Valid: cpu, gpu, auto" >&2
+        exit 1 ;;
+esac
+
+# Auto-detect GPU binary suffix
+if [[ "$DEVICE" == "gpu" ]]; then
+    # If user specified a binary path, use it as-is; otherwise try auto-detect
+    if [[ "$_DEFAULT_BINARY_DIR" != "/not/found" ]]; then
+        # Try common GPU binary names
+        for gpu_name in abacus_pw_gpu abacus_basic_gpu abacus_std_gpu abacus_gpu; do
+            if [[ -x "$_DEFAULT_BINARY_DIR/$gpu_name" ]]; then
+                BINARY="$_DEFAULT_BINARY_DIR/$gpu_name"
+                break
+            fi
+        done
+    fi
+fi
 
 # ── resolve paths ───────────────────────────────────────────────────────────
 EXAMPLE_DIR="$(cd "$EXAMPLE_DIR" && pwd)"
@@ -137,6 +170,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "Solver:      $SOLVER"
     echo "MPI procs:   $NP"
     echo "OMP threads: $OMP_NUM_THREADS"
+    echo "Device:      $DEVICE"
     echo "Example:     $EXAMPLE_DIR"
     echo "Binary:      $BINARY"
     echo "Work dir:    $WORK_DIR"
@@ -156,6 +190,15 @@ if grep -q '^[[:space:]]*ks_solver' "$WORK_DIR/INPUT"; then
     sed -i "s/^[[:space:]]*ks_solver.*/ks_solver \t\t$SOLVER/" "$WORK_DIR/INPUT"
 else
     echo "ks_solver           $SOLVER" >> "$WORK_DIR/INPUT"
+fi
+
+# Add device line if not default (auto)
+if [[ "$DEVICE" != "auto" ]]; then
+    if grep -q '^[[:space:]]*device' "$WORK_DIR/INPUT"; then
+        sed -i "s/^[[:space:]]*device.*/device \t\t$DEVICE/" "$WORK_DIR/INPUT"
+    else
+        echo "device              $DEVICE" >> "$WORK_DIR/INPUT"
+    fi
 fi
 
 # Symlink STRU, KPT
@@ -202,7 +245,7 @@ WALL_TIME=$((END_TIME - START_TIME))
 
 # ── parse results ───────────────────────────────────────────────────────────
 echo ""
-echo "=== Results: $EXAMPLE_NAME / solver=$SOLVER ==="
+echo "=== Results: $EXAMPLE_NAME / solver=$SOLVER / device=$DEVICE ==="
 echo "Exit code:   $EXIT_CODE"
 echo "Wall time:   ${WALL_TIME}s"
 
@@ -250,16 +293,16 @@ fi
 RESULT_FILE="$OUTPUT_DIR/results_${EXAMPLE_NAME}.csv"
 if [[ ! -f "$RESULT_FILE" ]]; then
     if [[ "$SOLVER" == "ppcg" ]]; then
-        echo "solver,np,total_energy,scf_steps,wall_time_s,exit_code,ppcg_iters,ppcg_locked" > "$RESULT_FILE"
+        echo "solver,device,np,total_energy,scf_steps,wall_time_s,exit_code,ppcg_iters,ppcg_locked" > "$RESULT_FILE"
     else
-        echo "solver,np,total_energy,scf_steps,wall_time_s,exit_code" > "$RESULT_FILE"
+        echo "solver,device,np,total_energy,scf_steps,wall_time_s,exit_code" > "$RESULT_FILE"
     fi
 fi
 
 if [[ "$SOLVER" == "ppcg" ]]; then
-    echo "$SOLVER,$NP,$FINAL_ENERGY,$SCF_STEPS,$WALL_TIME,$EXIT_CODE,$PPCG_ITERS,$PPCG_LOCKED" >> "$RESULT_FILE"
+    echo "$SOLVER,$DEVICE,$NP,$FINAL_ENERGY,$SCF_STEPS,$WALL_TIME,$EXIT_CODE,$PPCG_ITERS,$PPCG_LOCKED" >> "$RESULT_FILE"
 else
-    echo "$SOLVER,$NP,$FINAL_ENERGY,$SCF_STEPS,$WALL_TIME,$EXIT_CODE" >> "$RESULT_FILE"
+    echo "$SOLVER,$DEVICE,$NP,$FINAL_ENERGY,$SCF_STEPS,$WALL_TIME,$EXIT_CODE" >> "$RESULT_FILE"
 fi
 
 # ── cleanup temporary working directory ─────────────────────────────────────
