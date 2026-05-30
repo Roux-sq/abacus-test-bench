@@ -21,6 +21,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../abacus-develop" && pwd)"
 MPIRUN=/opt/intel/oneapi/mpi/2021.13/bin/mpirun
 
+# Fetch latest remote refs so branches/commits are available
+echo "Fetching latest refs from origin..."
+cd "$REPO_DIR"
+git fetch origin --prune 2>/dev/null || echo "  (fetch skipped or no remote configured)"
+echo ""
+
 echo "=== Eigenvalue Solver Cross-Branch Benchmark ==="
 echo "Base:    $BASE_BRANCH"
 echo "Target:  $TARGET_BRANCH"
@@ -115,6 +121,24 @@ CMAKE_EOF
     fi
 }
 
+# --- Helper: safely checkout a branch or ref ---
+ensure_branch() {
+    local ref="$1"
+    cd "$REPO_DIR"
+    if git show-ref --verify --quiet "refs/heads/$ref" 2>/dev/null; then
+        git checkout "$ref" 2>/dev/null
+    elif git show-ref --verify --quiet "refs/remotes/origin/$ref" 2>/dev/null; then
+        # Remote branch exists but no local tracking branch yet
+        git checkout -B "$ref" "origin/$ref" 2>/dev/null
+    elif git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+        # Detached HEAD for commit-ish refs
+        git checkout "$ref" 2>/dev/null
+    else
+        echo "ERROR: Cannot resolve branch/ref '$ref' in $REPO_DIR" >&2
+        exit 1
+    fi
+}
+
 # --- Save any uncommitted changes ---
 cd "$REPO_DIR"
 if ! git diff-index --quiet HEAD -- 2>/dev/null; then
@@ -131,7 +155,7 @@ for algo in bpcg david; do
 
     out_csv="$SCRIPT_DIR/${algo}_bench.csv"
 
-    git checkout "$BASE_BRANCH" 2>/dev/null
+    ensure_branch "$BASE_BRANCH"
     rm -rf build
     inject_benchmark "$algo"
     CC=/opt/intel/oneapi/mpi/2021.13/bin/mpicc \
@@ -155,7 +179,7 @@ after_csv="$SCRIPT_DIR/ppcg_after.csv"
 
 # --- Base branch (v1, per-band mode) ---
 echo "--- Base branch: $BASE_BRANCH (per-band) ---"
-git checkout "$BASE_BRANCH" 2>/dev/null
+ensure_branch "$BASE_BRANCH"
 rm -rf build
 inject_benchmark "ppcg"
 CC=/opt/intel/oneapi/mpi/2021.13/bin/mpicc \
@@ -167,7 +191,7 @@ uninject_benchmark
 
 # --- Target branch (v2, blocked variant with block_size=4, no extra bands) ---
 echo "--- Target branch: $TARGET_BRANCH (block_size=4) ---"
-git checkout "$TARGET_BRANCH" 2>/dev/null
+ensure_branch "$TARGET_BRANCH"
 rm -rf build
 inject_benchmark "ppcg"
 CC=/opt/intel/oneapi/mpi/2021.13/bin/mpicc \
