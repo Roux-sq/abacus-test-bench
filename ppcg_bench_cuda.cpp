@@ -1,9 +1,12 @@
 /**
- * BPCG benchmark: measures runtime for configurable test cases.
- * Outputs CSV lines: npw,nband,sparsity,mpi_procs,omp_threads,time_ms,max_error
+ * PPCG CUDA benchmark: measures iteration count and runtime on GPU.
+ * Outputs CSV lines: npw,nband,sparsity,mpi_procs,omp_threads,iterations,time_ms,max_error
+ *
+ * Build requires: -D__CUDA (or -D__ROCM) and linked against the corresponding
+ * device math kernels (math_kernel_op.cu etc.).
  */
 #include "../diago_iter_assist.h"
-#include "../diago_bpcg.h"
+#include "../diago_ppcg.h"
 #include "diago_mock.h"
 #include "source_base/kernels/math_kernel_op.h"
 #include "source_basis/module_pw/test/test_tool.h"
@@ -11,6 +14,8 @@
 #include "source_hamilt/hamilt.h"
 #include "source_pw/module_pwdft/hamilt_pw.h"
 #include "source_psi/psi.h"
+#include "source_base/module_device/memory_op.h"
+#include "source_base/module_device/device.h"
 
 #include <chrono>
 #include <complex>
@@ -54,10 +59,13 @@ int main(int argc, char** argv)
     MPI_Init(&argc, &argv);
 #endif
 
+    // Parse args: npw nband sparsity ethr n_extra block_size
     int npw = (argc > 1) ? std::atoi(argv[1]) : 100;
     int nband = (argc > 2) ? std::atoi(argv[2]) : 10;
     int sparsity = (argc > 3) ? std::atoi(argv[3]) : 6;
     double ethr = (argc > 4) ? std::atof(argv[4]) : 1e-7;
+    int n_extra = (argc > 5) ? std::atoi(argv[5]) : 0;
+    int block_size = (argc > 6) ? std::atoi(argv[6]) : 0;
 
     int omp_threads = 1;
     const char* omp_env = std::getenv("OMP_NUM_THREADS");
@@ -81,9 +89,10 @@ int main(int argc, char** argv)
     MPI_Bcast(e_lapack.data(), npw, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
 
-    // Initial psi with perturbation
+    // Initial psi with perturbation (include extra bands)
+    const int n_band_total = nband + n_extra;
     psi::Psi<std::complex<double>> psi;
-    psi.resize(1, nband, npw);
+    psi.resize(1, n_band_total, npw);
     std::default_random_engine engine(7);
     std::uniform_real_distribution<double> dist(0.2, 1.0);
     for (int ib = 0; ib < nband; ++ib)
@@ -93,10 +102,20 @@ int main(int argc, char** argv)
             psi(ib, ig) = h_lapack[ig + ib * npw] * dist(engine);
         }
     }
+    // Initialize extra bands with independent random vectors (different seed).
+    {
+        std::default_random_engine engine_extra(42);
+        std::uniform_real_distribution<double> dist_extra(-1.0, 1.0);
+        for (int ib = nband; ib < n_band_total; ++ib)
+        {
+            for (int ig = 0; ig < npw; ++ig)
+            {
+                psi(ib, ig) = std::complex<double>(dist_extra(engine_extra), dist_extra(engine_extra));
+            }
+        }
+    }
 
     // MPI distribution: each process keeps full data for correct benchmark
-    // (true MPI parallel H*psi would need distributed H and Allgatherv of psi,
-    //  which is beyond the scope of this simplified benchmark)
     psi::Psi<std::complex<double>> psi_local;
     DIAGOTEST::npw_local = new int[nproc];
     double* precondition_local = nullptr;
@@ -125,32 +144,63 @@ int main(int argc, char** argv)
 
     psi_local.fix_k(0);
     using T = std::complex<double>;
+    using Device = base_device::DEVICE_GPU;
     const int dim = DIAGOTEST::npw;
     const std::vector<T>& h_mat = DIAGOTEST::hmatrix_local;
-    auto hpsi_func = [h_mat, dim](T* psi_in, T* hpsi_out, const int ld_psi, const int nvec) {
+
+    // ---- Upload H matrix and psi to GPU ----
+    T* h_mat_device = nullptr;
+    base_device::memory::resize_memory_op<T, Device>()(h_mat_device, static_cast<size_t>(dim) * dim);
+    base_device::memory::synchronize_memory_op<T, Device, base_device::DEVICE_CPU>()(
+        h_mat_device, h_mat.data(), static_cast<size_t>(dim) * dim);
+
+    T* psi_device = nullptr;
+    base_device::memory::resize_memory_op<T, Device>()(psi_device, static_cast<size_t>(n_band_total) * npw);
+    base_device::memory::synchronize_memory_op<T, Device, base_device::DEVICE_CPU>()(
+        psi_device, psi_local.get_pointer(), static_cast<size_t>(n_band_total) * npw);
+
+    auto hpsi_func = [h_mat_device, dim](T* psi_in, T* hpsi_out, const int ld_psi, const int nvec) {
         const T one(1.0);
         const T zero(0.0);
-        ModuleBase::gemm_op<T, base_device::DEVICE_CPU>()(
+        ModuleBase::gemm_op<T, Device>()(
             'N', 'N',
             dim, nvec, dim,
             &one,
-            h_mat.data(), dim,
+            h_mat_device, dim,
             psi_in, ld_psi,
             &zero,
             hpsi_out, ld_psi);
     };
 
-    hsolver::DiagoIterAssist<std::complex<double>>::PW_DIAG_NMAX = 200;
-    hsolver::DiagoBPCG<std::complex<double>> bpcg(precondition_local);
+    ModuleBase::createGpuBlasHandle();
 
-    const int ndim = psi_local.get_current_ngk();
-    bpcg.init_iter(nband, nband, npw, ndim);
+    hsolver::DiagoIterAssist<T, Device>::PW_DIAG_NMAX = 200;
+    hsolver::DiagoPPCG<T, Device> ppcg(precondition_local);
+
+    if (n_extra > 0)
+    {
+        ppcg.set_n_extra(n_extra);
+    }
+    if (block_size > 0)
+    {
+        std::vector<int> block_sizes;
+        int remaining = nband;
+        while (remaining > 0)
+        {
+            int sz = std::min(block_size, remaining);
+            block_sizes.push_back(sz);
+            remaining -= sz;
+        }
+        ppcg.set_block_sizes(block_sizes);
+    }
+
+    ppcg.init_iter(nband, nband, npw, psi_local.get_current_ngk());
 
     std::vector<double> eigen(nband, 0.0);
     std::vector<double> ethr_band(nband, ethr);
 
     auto t_start = std::chrono::high_resolution_clock::now();
-    bpcg.diag(hpsi_func, psi_local.get_pointer(), eigen.data(), ethr_band);
+    int niter = ppcg.diag(hpsi_func, psi_device, eigen.data(), ethr_band);
     auto t_end = std::chrono::high_resolution_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
@@ -166,12 +216,25 @@ int main(int argc, char** argv)
     if (myrank == 0)
     {
         std::cout << npw << "," << nband << "," << sparsity << ","
-                  << nproc << "," << omp_threads << ","
-                  << elapsed_ms << "," << max_error << std::endl;
+                  << nproc << "," << omp_threads << "," << niter << ","
+                  << elapsed_ms << "," << max_error;
+        if (n_extra > 0)
+        {
+            std::cout << "," << n_extra;
+        }
+        if (block_size > 0)
+        {
+            std::cout << "," << block_size;
+        }
+        std::cout << std::endl;
     }
 
+    base_device::memory::delete_memory_op<T, Device>()(h_mat_device);
+    base_device::memory::delete_memory_op<T, Device>()(psi_device);
     delete[] DIAGOTEST::npw_local;
     delete[] precondition_local;
+
+    ModuleBase::destoryBLAShandle();
 
     MPI_Finalize();
     return 0;

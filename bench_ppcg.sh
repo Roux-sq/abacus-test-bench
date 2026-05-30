@@ -10,7 +10,7 @@
 
 set -e
 
-MPIRUN=/opt/intel/oneapi/mpi/2021.13/bin/mpirun
+MPIRUN=/usr/bin/mpirun
 BUILD_DIR=$(cd "$(dirname "$0")/../abacus-develop/build" && pwd)
 
 ALGO="ppcg"
